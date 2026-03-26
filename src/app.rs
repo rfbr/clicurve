@@ -1,6 +1,6 @@
 use crate::store::MultiStore;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -74,6 +74,14 @@ pub struct App {
     chart_bounds: [f64; 4],
     /// Y-axis label width from last draw
     y_label_width: u16,
+    /// Zoom bounds [x_min, x_max, y_min, y_max] overriding auto bounds
+    zoom_bounds: Option<[f64; 4]>,
+    /// Terminal position where mouse drag started
+    drag_start: Option<(u16, u16)>,
+    /// Time of last mouse click (for double-click detection)
+    last_click: Instant,
+    /// Pan state: (terminal start pos, zoom bounds at pan start)
+    pan_start: Option<((u16, u16), [f64; 4])>,
 }
 
 impl App {
@@ -121,6 +129,10 @@ impl App {
             chart_area: Rect::default(),
             chart_bounds: [0.0; 4],
             y_label_width: 8,
+            zoom_bounds: None,
+            drag_start: None,
+            last_click: Instant::now(),
+            pan_start: None,
         }
     }
 
@@ -181,6 +193,41 @@ impl App {
             .collect()
     }
 
+    /// Map terminal coordinates to data coordinates using last frame's chart geometry.
+    fn terminal_to_data(&self, tx: u16, ty: u16) -> Option<(f64, f64)> {
+        let area = self.chart_area;
+        let [x_min, x_max, y_min, y_max] = self.chart_bounds;
+        let y_lw = self.y_label_width;
+
+        let plot_x = area.x + 1 + y_lw + 1;
+        let plot_y = area.y + 1;
+        let plot_w = area.width.saturating_sub(3 + y_lw);
+        let plot_h = area.height.saturating_sub(4);
+
+        if tx < plot_x || tx >= plot_x + plot_w || ty < plot_y || ty >= plot_y + plot_h || plot_w == 0 || plot_h == 0 {
+            return None;
+        }
+
+        let frac_x = (tx - plot_x) as f64 / plot_w as f64;
+        let frac_y = 1.0 - (ty - plot_y) as f64 / plot_h as f64;
+        Some((
+            x_min + frac_x * (x_max - x_min),
+            y_min + frac_y * (y_max - y_min),
+        ))
+    }
+
+    /// Zoom in/out centered on a terminal position. Factor < 1 zooms in, > 1 zooms out.
+    fn zoom_at(&mut self, pos: (u16, u16), factor: f64) {
+        let Some((cx, cy)) = self.terminal_to_data(pos.0, pos.1) else { return };
+        let [x_min, x_max, y_min, y_max] = self.zoom_bounds.unwrap_or(self.chart_bounds);
+        self.zoom_bounds = Some([
+            cx - (cx - x_min) * factor,
+            cx + (x_max - cx) * factor,
+            cy - (cy - y_min) * factor,
+            cy + (y_max - cy) * factor,
+        ]);
+    }
+
     pub fn reload(&mut self) -> Result<()> {
         self.store.reload(&self.dir)?;
         self.exp_names = self.store.experiment_names().iter().map(|s| s.to_string()).collect();
@@ -235,8 +282,70 @@ impl App {
         // Handle mouse events
         if let Event::Mouse(mouse) = &ev {
             match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let now = Instant::now();
+                    if now.duration_since(self.last_click) < Duration::from_millis(300) {
+                        // Double-click: reset zoom
+                        self.zoom_bounds = None;
+                        self.drag_start = None;
+                    } else {
+                        self.drag_start = Some((mouse.column, mouse.row));
+                    }
+                    self.last_click = now;
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    // Right-click: start panning
+                    let zb = self.zoom_bounds.unwrap_or(self.chart_bounds);
+                    self.pan_start = Some(((mouse.column, mouse.row), zb));
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(start) = self.drag_start.take() {
+                        let end = (mouse.column, mouse.row);
+                        let dx = (end.0 as i32 - start.0 as i32).abs();
+                        let dy = (end.1 as i32 - start.1 as i32).abs();
+                        if dx > 3 || dy > 3 {
+                            if let (Some(d0), Some(d1)) = (
+                                self.terminal_to_data(start.0, start.1),
+                                self.terminal_to_data(end.0, end.1),
+                            ) {
+                                self.zoom_bounds = Some([
+                                    d0.0.min(d1.0),
+                                    d0.0.max(d1.0),
+                                    d0.1.min(d1.1),
+                                    d0.1.max(d1.1),
+                                ]);
+                            }
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Right) => {
+                    self.pan_start = None;
+                }
                 MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                     self.mouse_pos = Some((mouse.column, mouse.row));
+                    // Pan: shift zoom bounds based on drag delta
+                    if let Some(((tx0, ty0), orig)) = self.pan_start {
+                        let plot_w = self.chart_area.width.saturating_sub(3 + self.y_label_width) as f64;
+                        let plot_h = self.chart_area.height.saturating_sub(4) as f64;
+                        if plot_w > 0.0 && plot_h > 0.0 {
+                            let dx = -(mouse.column as f64 - tx0 as f64) * (orig[1] - orig[0]) / plot_w;
+                            let dy = (mouse.row as f64 - ty0 as f64) * (orig[3] - orig[2]) / plot_h;
+                            self.zoom_bounds = Some([
+                                orig[0] + dx, orig[1] + dx,
+                                orig[2] + dy, orig[3] + dy,
+                            ]);
+                        }
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if let Some(pos) = self.mouse_pos {
+                        self.zoom_at(pos, 0.8);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(pos) = self.mouse_pos {
+                        self.zoom_at(pos, 1.25);
+                    }
                 }
                 _ => {}
             }
@@ -657,6 +766,14 @@ impl App {
         x_min -= x_pad;
         x_max += x_pad;
 
+        // Apply zoom if set
+        if let Some([zx_min, zx_max, zy_min, zy_max]) = self.zoom_bounds {
+            x_min = zx_min;
+            x_max = zx_max;
+            y_min = zy_min;
+            y_max = zy_max;
+        }
+
         let datasets: Vec<Dataset> = if use_smoothing {
             // When smoothing: raw data faded + smoothed line bright
             all_series
@@ -720,6 +837,23 @@ impl App {
             );
 
         frame.render_widget(chart, area);
+
+        // Selection rectangle during drag
+        if let (Some(start), Some(current)) = (self.drag_start, self.mouse_pos) {
+            let rx = start.0.min(current.0);
+            let ry = start.1.min(current.1);
+            let rw = (start.0.max(current.0) - rx).saturating_add(1);
+            let rh = (start.1.max(current.1) - ry).saturating_add(1);
+            if rw > 1 && rh > 1 {
+                let sel_rect = Rect::new(rx, ry, rw, rh);
+                frame.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::White)),
+                    sel_rect,
+                );
+            }
+        }
 
         // Hover tooltip
         if let Some((mx, my)) = self.mouse_pos {

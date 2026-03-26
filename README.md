@@ -52,12 +52,21 @@ clicurve /path/to/xps/ -f "train/ce" -l
 | `r` | Reload data from disk |
 | `q` | Quit |
 
-Mouse hover over the chart shows the nearest data point value.
+### Mouse
+
+| Action | Effect |
+|--------|--------|
+| Hover over chart | Tooltip with nearest data point value |
+| Scroll up / down | Zoom in / out (centered on cursor) |
+| Left-click drag | Rectangle selection zoom |
+| Right-click drag | Pan the viewport |
+| Double-click | Reset zoom to fit all data |
 
 ## Features
 
 - **Multi-experiment comparison** — select multiple experiments, same metric plotted with distinct colors per experiment
 - **EMA smoothing** — adjustable exponential moving average with bias correction (same algorithm as TensorBoard), raw data shown faded behind the smoothed line
+- **Interactive zoom & pan** — scroll to zoom, drag to select a region, right-drag to pan, double-click to reset
 - **Mouse hover** — tooltip with exact metric name, step, and value
 - **Live reload** — auto-refreshes every 30s, or press `r` to reload manually
 - **Fast** — reads TFRecord protobuf directly in Rust, handles hundreds of event files in seconds
