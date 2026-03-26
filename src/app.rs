@@ -879,7 +879,7 @@ impl App {
                         .style(Style::default().fg(faded))
                         .data(&s.raw);
                     let smooth_ds = Dataset::default()
-                        .name(s.label.clone())
+                        .name(String::new())
                         .marker(symbols::Marker::Braille)
                         .graph_type(GraphType::Line)
                         .style(Style::default().fg(s.color))
@@ -892,7 +892,7 @@ impl App {
                 .iter()
                 .map(|s| {
                     Dataset::default()
-                        .name(s.label.clone())
+                        .name(String::new())
                         .marker(symbols::Marker::Braille)
                         .graph_type(GraphType::Line)
                         .style(Style::default().fg(s.color))
