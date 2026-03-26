@@ -12,6 +12,7 @@ use ratatui::{
     },
     Frame,
 };
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,15 @@ enum Panel {
     Metrics,
 }
 
+/// An item in the metric tree display list.
+#[derive(Clone)]
+enum MetricNode {
+    /// Collapsible group header (e.g. "train")
+    Group(String),
+    /// Leaf metric: (index into visible_tags, display name)
+    Leaf(usize, String),
+}
+
 pub struct App {
     pub store: MultiStore,
     pub dir: PathBuf,
@@ -54,6 +64,10 @@ pub struct App {
     visible_tags: Vec<String>,
     metric_selected: Vec<bool>,
     metric_list_state: ListState,
+    /// Tree display list for metrics (groups + leaves)
+    metric_tree: Vec<MetricNode>,
+    /// Which metric groups are collapsed
+    collapsed_groups: HashSet<String>,
 
     /// Filter string for metrics
     pub filter: String,
@@ -97,8 +111,10 @@ impl App {
 
         let visible_tags = store.all_tags();
         let metric_selected = vec![false; visible_tags.len()];
+        let collapsed_groups = HashSet::new();
+        let metric_tree = Self::build_metric_tree(&visible_tags, &collapsed_groups);
         let mut metric_list_state = ListState::default();
-        if !visible_tags.is_empty() {
+        if !metric_tree.is_empty() {
             metric_list_state.select(Some(0));
         }
 
@@ -119,6 +135,8 @@ impl App {
             visible_tags,
             metric_selected,
             metric_list_state,
+            metric_tree,
+            collapsed_groups,
             filter: String::new(),
             filter_mode: false,
             log_scale: false,
@@ -136,6 +154,50 @@ impl App {
         }
     }
 
+    /// Build the metric tree display list from tags and collapsed state.
+    fn build_metric_tree(visible_tags: &[String], collapsed_groups: &HashSet<String>) -> Vec<MetricNode> {
+        let mut groups: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+        let mut ungrouped: Vec<(usize, String)> = Vec::new();
+
+        for (i, tag) in visible_tags.iter().enumerate() {
+            if let Some(slash) = tag.find('/') {
+                let group = tag[..slash].to_string();
+                let rest = tag[slash + 1..].to_string();
+                groups.entry(group).or_default().push((i, rest));
+            } else {
+                ungrouped.push((i, tag.clone()));
+            }
+        }
+
+        let mut tree = Vec::new();
+        for (idx, name) in ungrouped {
+            tree.push(MetricNode::Leaf(idx, name));
+        }
+        for (group, members) in &groups {
+            tree.push(MetricNode::Group(group.clone()));
+            if !collapsed_groups.contains(group) {
+                for (idx, name) in members {
+                    tree.push(MetricNode::Leaf(*idx, name.clone()));
+                }
+            }
+        }
+        tree
+    }
+
+    fn rebuild_metric_tree(&mut self) {
+        self.metric_tree = Self::build_metric_tree(&self.visible_tags, &self.collapsed_groups);
+        // Clamp cursor
+        if let Some(idx) = self.metric_list_state.selected() {
+            if idx >= self.metric_tree.len() {
+                self.metric_list_state.select(if self.metric_tree.is_empty() {
+                    None
+                } else {
+                    Some(self.metric_tree.len() - 1)
+                });
+            }
+        }
+    }
+
     fn update_visible_tags(&mut self) {
         let all_tags = self.store.all_tags();
         if self.filter.is_empty() {
@@ -148,7 +210,7 @@ impl App {
                 .collect();
         }
         // Preserve selections by tag name
-        let old_selected: std::collections::HashSet<String> = self
+        let old_selected: HashSet<String> = self
             .store
             .all_tags()
             .into_iter()
@@ -161,16 +223,7 @@ impl App {
             .iter()
             .map(|t| old_selected.contains(t))
             .collect();
-        // Clamp cursor
-        if let Some(idx) = self.metric_list_state.selected() {
-            if idx >= self.visible_tags.len() {
-                self.metric_list_state.select(if self.visible_tags.is_empty() {
-                    None
-                } else {
-                    Some(self.visible_tags.len() - 1)
-                });
-            }
-        }
+        self.rebuild_metric_tree();
     }
 
     /// Get indices of selected experiments.
@@ -243,7 +296,7 @@ impl App {
     fn active_list_len(&self) -> usize {
         match self.panel {
             Panel::Experiments => self.exp_names.len(),
-            Panel::Metrics => self.visible_tags.len(),
+            Panel::Metrics => self.metric_tree.len(),
         }
     }
 
@@ -457,10 +510,31 @@ impl App {
                 }
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                if let Some(idx) = self.active_list_state().selected() {
-                    let sel = self.active_selected_mut();
-                    if let Some(s) = sel.get_mut(idx) {
-                        *s = !*s;
+                match self.panel {
+                    Panel::Experiments => {
+                        if let Some(idx) = self.exp_list_state.selected() {
+                            if let Some(s) = self.exp_selected.get_mut(idx) {
+                                *s = !*s;
+                            }
+                        }
+                    }
+                    Panel::Metrics => {
+                        if let Some(idx) = self.metric_list_state.selected() {
+                            match self.metric_tree.get(idx).cloned() {
+                                Some(MetricNode::Group(name)) => {
+                                    if !self.collapsed_groups.remove(&name) {
+                                        self.collapsed_groups.insert(name);
+                                    }
+                                    self.rebuild_metric_tree();
+                                }
+                                Some(MetricNode::Leaf(tag_idx, _)) => {
+                                    if let Some(s) = self.metric_selected.get_mut(tag_idx) {
+                                        *s = !*s;
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
                     }
                 }
             }
@@ -616,18 +690,36 @@ impl App {
     fn draw_metric_list(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.panel == Panel::Metrics;
         let items: Vec<ListItem> = self
-            .visible_tags
+            .metric_tree
             .iter()
-            .enumerate()
-            .map(|(i, tag)| {
-                let selected = self.metric_selected.get(i).copied().unwrap_or(false);
-                let marker = if selected { "● " } else { "  " };
-                let style = if selected {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                ListItem::new(format!("{marker}{tag}")).style(style)
+            .map(|node| match node {
+                MetricNode::Group(name) => {
+                    let collapsed = self.collapsed_groups.contains(name);
+                    let arrow = if collapsed { "▶" } else { "▼" };
+                    let prefix = format!("{}/", name);
+                    let n_sel = self.visible_tags.iter().enumerate()
+                        .filter(|(i, t)| t.starts_with(&prefix) && self.metric_selected.get(*i).copied().unwrap_or(false))
+                        .count();
+                    let n_total = self.visible_tags.iter().filter(|t| t.starts_with(&prefix)).count();
+                    let style = if n_sel > 0 {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    ListItem::new(format!("{arrow} {name}/ ({n_sel}/{n_total})")).style(style)
+                }
+                MetricNode::Leaf(idx, display_name) => {
+                    let selected = self.metric_selected.get(*idx).copied().unwrap_or(false);
+                    let in_group = self.visible_tags.get(*idx).is_some_and(|t| t.contains('/'));
+                    let indent = if in_group { "  " } else { "" };
+                    let marker = if selected { "● " } else { "  " };
+                    let style = if selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    ListItem::new(format!("{indent}{marker}{display_name}")).style(style)
+                }
             })
             .collect();
 
