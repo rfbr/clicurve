@@ -80,11 +80,8 @@ impl App {
     pub fn new(store: MultiStore, dir: PathBuf) -> Self {
         let multi_exp = store.experiments.len() > 1;
         let exp_names: Vec<String> = store.experiment_names().iter().map(|s| s.to_string()).collect();
-        // In multi-exp mode, select first experiment by default
-        let mut exp_selected = vec![false; exp_names.len()];
-        if let Some(first) = exp_selected.first_mut() {
-            *first = true;
-        }
+        // Select all experiments by default
+        let exp_selected = vec![true; exp_names.len()];
         let mut exp_list_state = ListState::default();
         if !exp_names.is_empty() {
             exp_list_state.select(Some(0));
