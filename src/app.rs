@@ -110,7 +110,10 @@ impl App {
         }
 
         let visible_tags = store.all_tags();
-        let metric_selected = vec![false; visible_tags.len()];
+        let mut metric_selected = vec![false; visible_tags.len()];
+        if let Some(first) = metric_selected.first_mut() {
+            *first = true;
+        }
         let collapsed_groups = HashSet::new();
         let metric_tree = Self::build_metric_tree(&visible_tags, &collapsed_groups);
         let mut metric_list_state = ListState::default();
