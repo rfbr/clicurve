@@ -786,6 +786,17 @@ impl App {
         // When smoothing is active, we add two datasets per series:
         //   1. Raw data (faded color)
         //   2. EMA-smoothed line (bright color, with legend label)
+        //
+        // Braille cells are 2 dots wide; compute pixel budget up front so we
+        // can resample raw data BEFORE applying EMA. This ensures the smooth
+        // curve has no x-collisions (it inherits the raw data's x values, so
+        // smoothing after resampling is essential for a gap-free smooth line).
+        //
+        // The actual plot braille columns = (area.width - borders - y_axis) * 2.
+        // Borders: 2 chars. Y-axis labels + margin: ~10 chars (conservative).
+        // Using one fewer point than braille columns ensures no sub-pixel pairs.
+        let px = (area.width as usize).saturating_sub(13);
+
         struct SeriesData {
             label: String,
             raw: Vec<(f64, f64)>,
@@ -813,7 +824,7 @@ impl App {
 
                 let t0 = points.first().map(|p| p.wall_time).unwrap_or(0.0);
 
-                let raw: Vec<(f64, f64)> = points
+                let raw_full: Vec<(f64, f64)> = points
                     .iter()
                     .filter_map(|p| {
                         let x = if self.wall_time_axis {
@@ -831,15 +842,21 @@ impl App {
                     })
                     .collect();
 
+                // Resample raw to pixel resolution first, then apply EMA.
+                // This eliminates x-collisions before smoothing, so the smooth
+                // curve is guaranteed to be as dense as the display resolution.
+                let raw = resample(&raw_full, px);
                 let smoothed = if use_smoothing {
                     ema_smooth(&raw, self.smoothing)
                 } else {
                     Vec::new()
                 };
 
-                // Bounds from the displayed data (smoothed if active, else raw)
-                let bounds_data = if use_smoothing { &smoothed } else { &raw };
-                for &(x, y) in bounds_data {
+                // Always use raw for y-bounds. Smooth values are always within
+                // the raw range (EMA is a weighted average), so this guarantees
+                // no data point — raw or smooth — is clipped by get_point()
+                // returning None, which would silently drop an entire line segment.
+                for &(x, y) in &raw {
                     if y < y_min { y_min = y; }
                     if y > y_max { y_max = y; }
                     if x < x_min { x_min = x; }
@@ -880,27 +897,30 @@ impl App {
             y_max = zy_max;
         }
 
+        // Series are already at pixel resolution; build datasets directly.
+        // IMPORTANT: draw all raw (faded) datasets before all smooth (bright)
+        // datasets. Ratatui's braille canvas uses last-writer-wins for cell
+        // color, so any raw dataset drawn after a smooth one would overwrite
+        // the smooth color with faded, creating apparent "gaps" in the smooth
+        // curves when multiple experiments are displayed.
         let datasets: Vec<Dataset> = if use_smoothing {
-            // When smoothing: raw data faded + smoothed line bright
-            all_series
-                .iter()
-                .flat_map(|s| {
-                    let faded = dim_color(s.color);
-                    let raw_ds = Dataset::default()
-                        .name(String::new())
-                        .marker(symbols::Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(faded))
-                        .data(&s.raw);
-                    let smooth_ds = Dataset::default()
-                        .name(String::new())
-                        .marker(symbols::Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(s.color))
-                        .data(&s.smoothed);
-                    [raw_ds, smooth_ds]
-                })
-                .collect()
+            let raw_datasets = all_series.iter().map(|s| {
+                Dataset::default()
+                    .name(String::new())
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(dim_color(s.color)))
+                    .data(&s.raw)
+            });
+            let smooth_datasets = all_series.iter().map(|s| {
+                Dataset::default()
+                    .name(String::new())
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(s.color))
+                    .data(&s.smoothed)
+            });
+            raw_datasets.chain(smooth_datasets).collect()
         } else {
             all_series
                 .iter()
@@ -1074,6 +1094,63 @@ fn make_axis_labels(min: f64, max: f64, count: usize) -> Vec<String> {
             format_number(val)
         })
         .collect()
+}
+
+/// Prepare data for display at a given pixel resolution.
+///
+/// - Sparse data (fewer points than pixels): linearly interpolate between
+///   consecutive points so ratatui draws a continuous line instead of
+///   isolated dots far apart.
+/// - Dense data (more points than pixels): bucket-average to avoid
+///   collisions where multiple points map to the same braille column.
+fn resample(data: &[(f64, f64)], pixels: usize) -> Vec<(f64, f64)> {
+    if data.is_empty() || pixels == 0 {
+        return data.to_vec();
+    }
+    let x_min = data.first().unwrap().0;
+    let x_max = data.last().unwrap().0;
+    let x_span = x_max - x_min;
+    if x_span < 1e-12 || data.len() < 2 {
+        return data.to_vec();
+    }
+
+    if data.len() >= pixels {
+        // Dense: bucket-average down to pixel resolution.
+        let mut sums = vec![0.0_f64; pixels];
+        let mut counts = vec![0_usize; pixels];
+        for &(x, y) in data {
+            let frac = (x - x_min) / x_span;
+            let idx = ((frac * pixels as f64) as usize).min(pixels - 1);
+            sums[idx] += y;
+            counts[idx] += 1;
+        }
+        sums.into_iter()
+            .zip(counts)
+            .enumerate()
+            .filter(|(_, (_, c))| *c > 0)
+            .map(|(i, (s, c))| {
+                let x = x_min + (i as f64 + 0.5) / pixels as f64 * x_span;
+                (x, s / c as f64)
+            })
+            .collect()
+    } else {
+        // Sparse: linearly interpolate to fill pixel columns.
+        // This gives ratatui enough points to draw a visually continuous line.
+        let mut result = Vec::with_capacity(pixels);
+        let mut j = 0usize; // index into data for left bracket
+        for i in 0..pixels {
+            let x = x_min + (i as f64 / (pixels - 1) as f64) * x_span;
+            // Advance j so data[j].0 <= x < data[j+1].0
+            while j + 2 < data.len() && data[j + 1].0 <= x {
+                j += 1;
+            }
+            let (x0, y0) = data[j];
+            let (x1, y1) = data[j + 1];
+            let t = if (x1 - x0).abs() < 1e-12 { 0.0 } else { (x - x0) / (x1 - x0) };
+            result.push((x, y0 + t * (y1 - y0)));
+        }
+        result
+    }
 }
 
 /// Exponential moving average with bias correction (same as TensorBoard).
