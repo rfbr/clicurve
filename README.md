@@ -5,6 +5,8 @@ No browser, no port forwarding, no fuss — just point it at your experiment log
 
 Built in Rust. Reads TFEvent files directly (protobuf parsing, no Python dependency).
 
+https://github.com/user-attachments/assets/8f9001a9-5178-4c35-b21d-76ba73adf313
+
 ## Install
 
 ```bash
