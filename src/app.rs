@@ -694,8 +694,7 @@ impl App {
             )
             .highlight_style(
                 Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             );
 
         frame.render_stateful_widget(list, area, &mut self.exp_list_state);
@@ -758,8 +757,7 @@ impl App {
             )
             .highlight_style(
                 Style::default()
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray),
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             );
 
         frame.render_stateful_widget(list, area, &mut self.metric_list_state);
