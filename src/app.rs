@@ -189,15 +189,19 @@ impl App {
 
     fn rebuild_metric_tree(&mut self) {
         self.metric_tree = Self::build_metric_tree(&self.visible_tags, &self.collapsed_groups);
-        // Clamp cursor
-        if let Some(idx) = self.metric_list_state.selected() {
-            if idx >= self.metric_tree.len() {
+        // Clamp cursor, and restore it if it was lost (e.g. after a 0-result filter)
+        match self.metric_list_state.selected() {
+            Some(idx) if idx >= self.metric_tree.len() => {
                 self.metric_list_state.select(if self.metric_tree.is_empty() {
                     None
                 } else {
                     Some(self.metric_tree.len() - 1)
                 });
             }
+            None if !self.metric_tree.is_empty() => {
+                self.metric_list_state.select(Some(0));
+            }
+            _ => {}
         }
     }
 
