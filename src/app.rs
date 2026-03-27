@@ -420,21 +420,28 @@ impl App {
         }
 
         if self.filter_mode {
-            match key.code {
-                KeyCode::Esc | KeyCode::Enter => {
-                    self.filter_mode = false;
+            let is_nav = matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k')
+            );
+            if !is_nav {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => {
+                        self.filter_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        self.filter.pop();
+                        self.update_visible_tags();
+                    }
+                    KeyCode::Char(c) => {
+                        self.filter.push(c);
+                        self.update_visible_tags();
+                    }
+                    _ => {}
                 }
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                    self.update_visible_tags();
-                }
-                KeyCode::Char(c) => {
-                    self.filter.push(c);
-                    self.update_visible_tags();
-                }
-                _ => {}
+                return Ok(true);
             }
-            return Ok(true);
+            // Navigation keys fall through to the main handler below
         }
 
         match key.code {
