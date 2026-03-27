@@ -218,12 +218,11 @@ impl App {
         }
         // Preserve selections by tag name
         let old_selected: HashSet<String> = self
-            .store
-            .all_tags()
-            .into_iter()
+            .visible_tags
+            .iter()
             .enumerate()
             .filter(|(i, _)| self.metric_selected.get(*i).copied().unwrap_or(false))
-            .map(|(_, t)| t)
+            .map(|(_, t)| t.clone())
             .collect();
         self.metric_selected = self
             .visible_tags
